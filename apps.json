@@ -1,0 +1,290 @@
+{
+  "storeName": "My APK Store",
+  "developer": "Your Name",
+  "apps": [
+    {
+      "id": "demo-notes",
+      "name": "Quick Notes",
+      "tagline": "Fast, simple notes",
+      "category": "Productivity",
+      "icon": "assets/notes.svg",
+      "color": "#e8a33d",
+      "version": "1.0.0",
+      "size": "12 MB",
+      "android": "Android 8.0+",
+      "updated": "2026-10-12",
+      "rating": 4.6,
+      "downloads": "1K+",
+      "price": "Free",
+      "description": "Write notes quickly with a clean interface. Replace this text with your real app description.",
+      "whatsNew": [
+        "First release",
+        "Bug fixes"
+      ],
+      "screenshots": [
+        "assets/shot1.svg",
+        "assets/shot2.svg",
+        "assets/shot3.svg"
+      ],
+      "apk": "apk/quick-notes.apk",
+      "developer": "Your Name",
+      "featured": true,
+      "permissions": [
+        "Internet",
+        "Storage",
+        "Notifications"
+      ],
+      "reviews": [
+        {
+          "name": "Rahim",
+          "rating": 5,
+          "text": "Khub sundor app, smooth cholche!",
+          "date": "2026-10-02"
+        },
+        {
+          "name": "Nusrat",
+          "rating": 4,
+          "text": "Simple and fast. Dark mode hole aro bhalo hoto.",
+          "date": "2026-09-28"
+        }
+      ],
+      "ratingCount": 128,
+      "package": "com.yourname.notes"
+    },
+    {
+      "id": "demo-todo",
+      "name": "Daily Tasks",
+      "tagline": "Plan your day",
+      "category": "Tools",
+      "icon": "assets/tasks.svg",
+      "color": "#5fa37a",
+      "version": "2.1.0",
+      "size": "9 MB",
+      "android": "Android 7.0+",
+      "updated": "2026-10-10",
+      "rating": 4.3,
+      "downloads": "500+",
+      "price": "Free",
+      "description": "Track tasks and habits. Replace this with your real description.",
+      "whatsNew": [
+        "New dark theme",
+        "Faster startup"
+      ],
+      "screenshots": [
+        "assets/shot2.svg",
+        "assets/shot3.svg",
+        "assets/shot1.svg"
+      ],
+      "apk": "apk/daily-tasks.apk",
+      "developer": "Your Name",
+      "featured": false,
+      "permissions": [
+        "Internet"
+      ],
+      "reviews": [
+        {
+          "name": "Rahim",
+          "rating": 5,
+          "text": "Khub sundor app, smooth cholche!",
+          "date": "2026-10-02"
+        },
+        {
+          "name": "Nusrat",
+          "rating": 4,
+          "text": "Simple and fast. Dark mode hole aro bhalo hoto.",
+          "date": "2026-09-28"
+        }
+      ],
+      "ratingCount": 64,
+      "package": "com.yourname.todo"
+    },
+    {
+      "id": "demo-game",
+      "name": "Pixel Runner",
+      "tagline": "Endless runner game",
+      "category": "Games",
+      "icon": "assets/game.svg",
+      "color": "#c9553d",
+      "version": "0.9.5",
+      "size": "48 MB",
+      "android": "Android 9.0+",
+      "updated": "2026-10-05",
+      "rating": 4.8,
+      "downloads": "10K+",
+      "price": "Free",
+      "description": "Run, jump and beat your high score. Replace this with your real description.",
+      "whatsNew": [
+        "New levels",
+        "Sound improvements"
+      ],
+      "screenshots": [
+        "assets/shot3.svg",
+        "assets/shot1.svg",
+        "assets/shot2.svg"
+      ],
+      "apk": "apk/pixel-runner.apk",
+      "developer": "Your Name",
+      "featured": false,
+      "permissions": [
+        "Internet"
+      ],
+      "reviews": [
+        {
+          "name": "Rahim",
+          "rating": 5,
+          "text": "Khub sundor app, smooth cholche!",
+          "date": "2026-10-02"
+        },
+        {
+          "name": "Nusrat",
+          "rating": 4,
+          "text": "Simple and fast. Dark mode hole aro bhalo hoto.",
+          "date": "2026-09-28"
+        }
+      ],
+      "ratingCount": 310,
+      "package": "com.yourname.game"
+    },
+    {
+      "id": "demo-music",
+      "name": "Beat Box",
+      "tagline": "Play your music",
+      "category": "Music",
+      "icon": "assets/game.svg",
+      "color": "#c9506a",
+      "version": "2.1.0",
+      "size": "18 MB",
+      "android": "Android 7.0+",
+      "updated": "2026-10-10",
+      "rating": 4.8,
+      "downloads": "10K+",
+      "price": "Free",
+      "description": "Track tasks and habits. Replace this with your real description.",
+      "whatsNew": [
+        "New dark theme",
+        "Faster startup"
+      ],
+      "screenshots": [
+        "assets/shot2.svg",
+        "assets/shot3.svg",
+        "assets/shot1.svg"
+      ],
+      "apk": "apk/beat-box.apk",
+      "developer": "Your Name",
+      "featured": false,
+      "permissions": [
+        "Internet"
+      ],
+      "reviews": [
+        {
+          "name": "Rahim",
+          "rating": 5,
+          "text": "Khub sundor app, smooth cholche!",
+          "date": "2026-10-02"
+        },
+        {
+          "name": "Nusrat",
+          "rating": 4,
+          "text": "Simple and fast. Dark mode hole aro bhalo hoto.",
+          "date": "2026-09-28"
+        }
+      ],
+      "ratingCount": 64,
+      "package": "com.yourname.music"
+    },
+    {
+      "id": "demo-weather",
+      "name": "Sky Check",
+      "tagline": "Weather, simply",
+      "category": "Tools",
+      "icon": "assets/tasks.svg",
+      "color": "#4a8fd1",
+      "version": "2.1.0",
+      "size": "7 MB",
+      "android": "Android 7.0+",
+      "updated": "2026-10-10",
+      "rating": 4.4,
+      "downloads": "2K+",
+      "price": "Free",
+      "description": "Track tasks and habits. Replace this with your real description.",
+      "whatsNew": [
+        "New dark theme",
+        "Faster startup"
+      ],
+      "screenshots": [
+        "assets/shot2.svg",
+        "assets/shot3.svg",
+        "assets/shot1.svg"
+      ],
+      "apk": "apk/sky-check.apk",
+      "developer": "Your Name",
+      "featured": false,
+      "permissions": [
+        "Internet"
+      ],
+      "reviews": [
+        {
+          "name": "Rahim",
+          "rating": 5,
+          "text": "Khub sundor app, smooth cholche!",
+          "date": "2026-10-02"
+        },
+        {
+          "name": "Nusrat",
+          "rating": 4,
+          "text": "Simple and fast. Dark mode hole aro bhalo hoto.",
+          "date": "2026-09-28"
+        }
+      ],
+      "ratingCount": 64,
+      "package": "com.yourname.weather"
+    },
+    {
+      "id": "demo-cam",
+      "name": "Snap Lens",
+      "tagline": "Photos made easy",
+      "category": "Photography",
+      "icon": "assets/notes.svg",
+      "color": "#8a5cc9",
+      "version": "2.1.0",
+      "size": "22 MB",
+      "android": "Android 7.0+",
+      "updated": "2026-10-10",
+      "rating": 4.1,
+      "downloads": "800+",
+      "price": "Free",
+      "description": "Track tasks and habits. Replace this with your real description.",
+      "whatsNew": [
+        "New dark theme",
+        "Faster startup"
+      ],
+      "screenshots": [
+        "assets/shot2.svg",
+        "assets/shot3.svg",
+        "assets/shot1.svg"
+      ],
+      "apk": "apk/snap-lens.apk",
+      "developer": "Your Name",
+      "featured": false,
+      "permissions": [
+        "Internet"
+      ],
+      "reviews": [
+        {
+          "name": "Rahim",
+          "rating": 5,
+          "text": "Khub sundor app, smooth cholche!",
+          "date": "2026-10-02"
+        },
+        {
+          "name": "Nusrat",
+          "rating": 4,
+          "text": "Simple and fast. Dark mode hole aro bhalo hoto.",
+          "date": "2026-09-28"
+        }
+      ],
+      "ratingCount": 64,
+      "package": "com.yourname.cam"
+    }
+  ]
+}
