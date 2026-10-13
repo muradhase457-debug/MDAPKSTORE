@@ -239,16 +239,53 @@ G.slab = (w, h, d, R, bev = .004, n = 6) => {
 
 /* ---------- scene graph ---------- */
 class Node {
-  constructor(geo, mat) { this.geo = geo || null; this.mat = mat || null; this.p = [0, 0, 0]; this.r = [0, 0, 0]; this.s = [1, 1, 1]; this.kids = []; this.parent = null; this.world = M4.ident(); this.visible = true; this.mesh = null; this.custom = null; this.cast = true; this.name = ""; }
+  constructor(geo, mat) { this.geo = geo || null; this.mat = mat || null; this.p = [0, 0, 0]; this.r = [0, 0, 0]; this.s = [1, 1, 1]; this.kids = []; this.parent = null; this.world = M4.ident(); this.visible = true; this.mesh = null; this.custom = null; this.cast = true; this.name = ""; this.dyn = false; this.hideGeo = false; }
   add(c) { c.parent = this; this.kids.push(c); return c; }
   pos(x, y, z) { this.p = [x, y, z]; return this; }
   rot(x, y, z) { this.r = [x, y, z]; return this; }
   scl(x, y, z) { this.s = y === undefined ? [x, x, x] : [x, y, z]; return this; }
   update(pw) {
+    if (this.frozen) return;
     if (this.custom) this.custom(this.world); else M4.trs(this.world, this.p, this.r, this.s);
     if (pw) M4.mul(pw, this.world, this.world);
     for (const k of this.kids) k.update(this.world);
   }
+}
+
+
+/* ---------- static batching: merge non-animated nodes that share a material into one draw ---------- */
+let _texId = 0;
+function batchNodes(roots, group, opts) {
+  opts = opts || {}; const buckets = new Map();
+  const key = (m, cast) => { const t = m.tex ? (m.tex.__id || (m.tex.__id = ++_texId)) : 0; return [t, m.color ? m.color.join(",") : "", m.uv ? m.uv.join(",") : "", m.rough, m.spec, m.metal, m.env, m.emi ? m.emi.join(",") : "", m.cutoff, m.two, m.unlit, m.noRecv, m.noShadow, m.noCull, m.sway, m.depthWrite, m.side, cast].join("|"); };
+  const push = (g, src, m) => {
+    const base = g.p.length / 3, P = src.p, N = src.n, UV = src.uv, C = src.c, I = src.i;
+    const a = m[0], b = m[1], c = m[2], d = m[4], e = m[5], f = m[6], gg = m[8], h = m[9], i2 = m[10], tx = m[12], ty = m[13], tz = m[14];
+    const c0 = [a, b, c], c1 = [d, e, f], c2 = [gg, h, i2], X0 = V.cross(c1, c2), X1 = V.cross(c2, c0), X2 = V.cross(c0, c1), flip = V.dot(c0, X0) < 0, det = flip ? -1 : 1;
+    for (let k = 0; k < P.length; k += 3) {
+      const px = P[k], py = P[k + 1], pz = P[k + 2];
+      g.p.push(a * px + d * py + gg * pz + tx, b * px + e * py + h * pz + ty, c * px + f * py + i2 * pz + tz);
+      const nx = N[k], ny = N[k + 1], nz = N[k + 2];
+      let ox = det * (nx * X0[0] + ny * X1[0] + nz * X2[0]), oy = det * (nx * X0[1] + ny * X1[1] + nz * X2[1]), oz = det * (nx * X0[2] + ny * X1[2] + nz * X2[2]); const l = Math.hypot(ox, oy, oz) || 1;
+      g.n.push(ox / l, oy / l, oz / l); const j = k / 3 * 2; g.uv.push(UV[j], UV[j + 1]); g.c.push(C[k], C[k + 1], C[k + 2]);
+    }
+    for (let k = 0; k < I.length; k += 3) { if (flip) g.i.push(base + I[k], base + I[k + 2], base + I[k + 1]); else g.i.push(base + I[k], base + I[k + 1], base + I[k + 2]); }
+  };
+  const visit = (n) => {
+    if (n.dyn || !n.visible || (opts.skip && opts.skip(n))) return;
+    if (n.geo && n.mat && !n.hideGeo && !n.custom) {
+      const m = n.mat;
+      if (!(m.shadowOnly || (m.alpha !== undefined && m.alpha < 1) || (opts.skipMat && opts.skipMat(m)))) {
+        const k = key(m, n.cast); let bk = buckets.get(k); if (!bk) buckets.set(k, bk = {mat: m, cast: n.cast, geo: new Geo(), nodes: []});
+        push(bk.geo, n.geo, n.world); bk.nodes.push(n);
+      }
+    }
+    for (const c of n.kids) visit(c);
+  };
+  roots.forEach(visit);
+  let merged = 0;
+  for (const bk of buckets.values()) { if (!bk.geo.i.length) continue; const nd = new Node(bk.geo, bk.mat); nd.cast = bk.cast; nd.batch = true; group.add(nd); bk.nodes.forEach(n => n.hideGeo = true); merged += bk.nodes.length; }
+  return {buckets: buckets.size, merged};
 }
 
 /* ---------- renderer ---------- */
@@ -352,10 +389,11 @@ void main(){ vec4 t=texture(uTex,vUV); o=vec4(uCol.rgb*t.rgb, uCol.a*t.a); }`;
 
 class Renderer {
   constructor(canvas, opts = {}) {
-    const gl = this.gl = canvas.getContext("webgl2", {antialias: true, alpha: false, powerPreference: "high-performance"});
+    const gl = this.gl = canvas.getContext("webgl2", {antialias: !opts.lite, alpha: false, powerPreference: "high-performance", preserveDrawingBuffer: false});
     if (!gl) throw new Error("WebGL2 not available");
     this.canvas = canvas; this.shadowSize = opts.shadowSize || 2048;
-    this.prog = this.link(VS, FS); this.sprog = this.link(SVS, SFS); this.spr = this.link(SPVS, SPFS);
+    this.lite = !!opts.lite; this.scale = 1; const LFS = this.lite ? FS.replace(/for\(int x=-1;x<=1;x\+\+\) for\(int y=-1;y<=1;y\+\+\) s \+= texture\(uShadow, vec3\(p\.xy\+vec2\(float\(x\),float\(y\)\)\*t\*1\.35, p\.z-0\.0006\)\);\s*return s\/9\.0;/, 'return texture(uShadow, vec3(p.xy, p.z-0.0009));') : FS;
+    this.prog = this.link(VS, LFS); this.sprog = this.link(SVS, SFS); this.spr = this.link(SPVS, SPFS);
     this.uc = new Map();
     this.aniso = gl.getExtension("EXT_texture_anisotropic") || gl.getExtension("EXT_texture_filter_anisotropic");
     this.maxAniso = this.aniso ? gl.getParameter(this.aniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT) : 1;
@@ -378,6 +416,9 @@ class Renderer {
     if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p)); p.u = {}; return p;
   }
   U(p, n) { if (!(n in p.u)) p.u[n] = this.gl.getUniformLocation(p, n); return p.u[n]; }
+  f1(p, n, v) { const l = this.U(p, n); if (this.uc.get(l) !== v) { this.uc.set(l, v); this.gl.uniform1f(l, v); } }
+  f2(p, n, a, b) { const l = this.U(p, n); let s = this.uc.get(l); if (!s || s.length !== 2) { s = [NaN, NaN]; this.uc.set(l, s); } if (s[0] !== a || s[1] !== b) { s[0] = a; s[1] = b; this.gl.uniform2f(l, a, b); } }
+  f3(p, n, a, b, c) { const l = this.U(p, n); let s = this.uc.get(l); if (!s || s.length !== 3) { s = [NaN, NaN, NaN]; this.uc.set(l, s); } if (s[0] !== a || s[1] !== b || s[2] !== c) { s[0] = a; s[1] = b; s[2] = c; this.gl.uniform3f(l, a, b, c); } }
   mesh(g) {
     const gl = this.gl, vao = gl.createVertexArray(); gl.bindVertexArray(vao);
     const buf = (arr, loc, size) => { const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(arr), gl.STATIC_DRAW); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 0, 0); };
@@ -387,7 +428,7 @@ class Renderer {
   }
   makeTex(src) {
     const gl = this.gl, t = gl.createTexture(), c = src.canvas, o = src.opts || {};
-    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, t);
     if (o.bleed) {
       const ctx = c.getContext("2d"), id = ctx.getImageData(0, 0, c.width, c.height), d = id.data; let r = 0, g = 0, b = 0, n = 0;
       for (let i = 0; i < d.length; i += 4) if (d[i + 3] > 200) { r += d[i]; g += d[i + 1]; b += d[i + 2]; n++; }
@@ -404,29 +445,29 @@ class Renderer {
   setMat(p, m, shadowPass) {
     const gl = this.gl, T = m.tex ? this.tex(m.tex) : null;
     if (shadowPass) {
-      gl.uniform1f(this.U(p, "uCut"), m.cutoff || 0); gl.uniform1f(this.U(p, "uHasTex"), T ? 1 : 0); gl.uniform1f(this.U(p, "uSway"), m.sway || 0);
-      gl.uniform1f(this.U(p, "uUVSx"), m.uv ? m.uv[0] : 1); gl.uniform1f(this.U(p, "uUVSy"), m.uv ? m.uv[1] : 1);
+      this.f1(p, "uCut", m.cutoff || 0); this.f1(p, "uHasTex", T ? 1 : 0); this.f1(p, "uSway", m.sway || 0);
+      this.f1(p, "uUVSx", m.uv ? m.uv[0] : 1); this.f1(p, "uUVSy", m.uv ? m.uv[1] : 1);
       if (T) { gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, T); gl.uniform1i(this.U(p, "uTex"), 0); } return;
     }
-    const c = m.color || [1, 1, 1]; gl.uniform3f(this.U(p, "uColor"), c[0], c[1], c[2]);
-    gl.uniform1f(this.U(p, "uHasTex"), T ? 1 : 0); gl.uniform2f(this.U(p, "uUVS"), m.uv ? m.uv[0] : 1, m.uv ? m.uv[1] : 1);
-    gl.uniform1f(this.U(p, "uRough"), m.rough === undefined ? .6 : m.rough); gl.uniform1f(this.U(p, "uSpec"), m.spec === undefined ? .25 : m.spec);
-    gl.uniform1f(this.U(p, "uMetal"), m.metal || 0); gl.uniform1f(this.U(p, "uEnv"), m.env === undefined ? .25 : m.env);
-    gl.uniform1f(this.U(p, "uCut"), m.cutoff || 0); gl.uniform1f(this.U(p, "uAlpha"), m.alpha === undefined ? 1 : m.alpha);
-    gl.uniform1f(this.U(p, "uTwo"), m.two ? 1 : 0); gl.uniform1f(this.U(p, "uUnlit"), m.unlit ? 1 : 0);
-    gl.uniform1f(this.U(p, "uShadowOn"), m.noRecv ? 0 : 1); gl.uniform1f(this.U(p, "uSway"), m.sway || 0);
-    const e = m.emi || [0, 0, 0]; gl.uniform3f(this.U(p, "uEmi"), e[0], e[1], e[2]);
+    const c = m.color || [1, 1, 1]; this.f3(p, "uColor", c[0], c[1], c[2]);
+    this.f1(p, "uHasTex", T ? 1 : 0); this.f2(p, "uUVS", m.uv ? m.uv[0] : 1, m.uv ? m.uv[1] : 1);
+    this.f1(p, "uRough", m.rough === undefined ? .6 : m.rough); this.f1(p, "uSpec", m.spec === undefined ? .25 : m.spec);
+    this.f1(p, "uMetal", m.metal || 0); this.f1(p, "uEnv", m.env === undefined ? .25 : m.env);
+    this.f1(p, "uCut", m.cutoff || 0); this.f1(p, "uAlpha", m.alpha === undefined ? 1 : m.alpha);
+    this.f1(p, "uTwo", m.two ? 1 : 0); this.f1(p, "uUnlit", m.unlit ? 1 : 0);
+    this.f1(p, "uShadowOn", m.noRecv ? 0 : 1); this.f1(p, "uSway", m.sway || 0);
+    const e = m.emi || [0, 0, 0]; this.f3(p, "uEmi", e[0], e[1], e[2]);
     if (T) { gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, T); gl.uniform1i(this.U(p, "uTex"), 0); }
     gl.depthMask(m.alpha !== undefined && m.alpha < 1 && !m.depthWrite ? false : true);
     if (m.side === "back") { gl.enable(gl.CULL_FACE); gl.cullFace(gl.FRONT); } else if (m.two || m.noCull) gl.disable(gl.CULL_FACE); else { gl.enable(gl.CULL_FACE); gl.cullFace(gl.BACK); }
   }
   collect(node, out) {
     if (!node.visible) return;
-    if (node.geo && node.mat) { if (!node.mesh) node.mesh = this.mesh(node.geo); out.push(node); }
+    if (node.geo && node.mat && !node.hideGeo) { if (!node.mesh) node.mesh = this.mesh(node.geo); out.push(node); }
     for (const k of node.kids) this.collect(k, out);
   }
   resize() {
-    const dpr = Math.min(window.devicePixelRatio || 1, this.maxDpr || 2), w = Math.max(2, Math.floor(this.canvas.clientWidth * dpr)), h = Math.max(2, Math.floor(this.canvas.clientHeight * dpr));
+    const dpr = Math.max(.4, Math.min(window.devicePixelRatio || 1, this.maxDpr || 2) * (this.scale || 1)), w = Math.max(2, Math.floor(this.canvas.clientWidth * dpr)), h = Math.max(2, Math.floor(this.canvas.clientHeight * dpr));
     if (this.canvas.width !== w || this.canvas.height !== h) { this.canvas.width = w; this.canvas.height = h; }
   }
   render(S, cam, time) {
@@ -437,15 +478,18 @@ class Renderer {
     /* shadow matrices */
     const Ld = V.norm(L.sunDir), C = S.shadowCenter || [0, 1, 0], lp = V.add(C, V.mul(Ld, 14));
     const lv = M4.lookAt(lp, C, Math.abs(Ld[1]) > .98 ? [1, 0, 0] : [0, 1, 0]), lproj = M4.ortho(-6.5, 6.5, -6.5, 6.5, 1, 30), lvp = M4.mul(lproj, lv);
-    /* pass 1: shadow */
+    /* pass 1: shadow (re-rendered only when something that casts shadows moved) */
+    this.shadowAge = (this.shadowAge || 0) + 1;
+    const needShadow = !this.shadowReady || S.shadowDirty || this.shadowAge >= (S.shadowEvery || 24);
+    if (needShadow) { this.shadowReady = true; this.shadowAge = 0;
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbo); gl.viewport(0, 0, this.shadowSize, this.shadowSize);
     gl.clear(gl.DEPTH_BUFFER_BIT); gl.enable(gl.DEPTH_TEST); gl.depthMask(true); gl.disable(gl.BLEND);
     gl.useProgram(this.sprog); gl.uniformMatrix4fv(this.U(this.sprog, "uLightVP"), false, lvp); gl.uniform1f(this.U(this.sprog, "uTime"), time);
     gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(1.5, 3); gl.disable(gl.CULL_FACE);
-    for (const n of list) { if (!n.cast || n.mat.noShadow || (n.mat.alpha !== undefined && n.mat.alpha < .9) || n.mat.unlit) continue; this.setMat(this.sprog, n.mat, true); gl.uniformMatrix4fv(this.U(this.sprog, "uModel"), false, n.world); gl.bindVertexArray(n.mesh.vao); gl.drawElements(gl.TRIANGLES, n.mesh.count, gl.UNSIGNED_INT, 0); }
-    gl.disable(gl.POLYGON_OFFSET_FILL);
+    for (const n of (S.noShadows ? [] : list)) { if (!n.cast || n.mat.noShadow || (n.mat.alpha !== undefined && n.mat.alpha < .9) || n.mat.unlit) continue; this.setMat(this.sprog, n.mat, true); gl.uniformMatrix4fv(this.U(this.sprog, "uModel"), false, n.world); gl.bindVertexArray(n.mesh.vao); gl.drawElements(gl.TRIANGLES, n.mesh.count, gl.UNSIGNED_INT, 0); }
+    gl.disable(gl.POLYGON_OFFSET_FILL); }
     /* pass 2: main */
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null); gl.viewport(0, 0, this.canvas.width, this.canvas.height); gl.enable(gl.DEPTH_TEST); gl.depthMask(true);
     const bg = L.bg; gl.clearColor(bg[0], bg[1], bg[2], 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
     const p = this.prog; gl.useProgram(p);
     const aspect = this.canvas.width / this.canvas.height;
@@ -501,7 +545,9 @@ function vnoise(x, y, seed, px, py) {
 function fbm(x, y, seed, oct, px, py) { let s = 0, a = .5, f = 1, n = 0; for (let i = 0; i < oct; i++) { s += a * vnoise(x * f, y * f, seed + i * 17, px ? px * f : 0, py ? py * f : 0); n += a; a *= .5; f *= 2; } return s / n; }
 const mixc = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
 const rgb255 = c => [c[0] * 255, c[1] * 255, c[2] * 255];
+TX.Q = 1;
 function perPixel(w, h, fn, opts) {
+  w = Math.max(16, Math.round(w * TX.Q)); h = Math.max(16, Math.round(h * TX.Q));
   const c = mkCanvas(w, h), ctx = c.getContext("2d"), id = ctx.createImageData(w, h), d = id.data;
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const col = fn(x, y, w, h), i = (y * w + x) * 4; d[i] = col[0]; d[i + 1] = col[1]; d[i + 2] = col[2]; d[i + 3] = col[3] === undefined ? 255 : col[3]; }
   ctx.putImageData(id, 0, 0); return {canvas: c, opts: opts || {}};
@@ -985,8 +1031,7 @@ const smooth = (x) => x * x * (3 - 2 * x);
 class Room {
   constructor(canvas, opts = {}) {
     this.canvas = canvas; this.mobile = !!opts.mobile; this.storeName = opts.storeName;
-    this.r = new Renderer(canvas, {shadowSize: this.mobile ? 1024 : 2048}); this.r.maxDpr = this.mobile ? 1.5 : 2;
-    initMaterials();
+    this.lite = !!opts.lite; this.r = new Renderer(canvas, {shadowSize: this.lite ? 1024 : 2048, lite: this.lite}); this.r.maxDpr = this.lite ? 1.6 : 2;
     this.root = new Node(); this.sprites = []; this.tiles = []; this.hot = []; this.steamers = []; this.flames = []; this.bulbs = []; this.lamps = [];
     this.mode = "day"; this.modeFrom = MODES.day; this.cur = JSON.parse(JSON.stringify(MODES.day)); this.target = "day"; this.modeT = 1;
     this.sel = null; this.hover = null; this.time = 0; this.sound = opts.sound || (() => {});
@@ -994,9 +1039,46 @@ class Room {
     this.S = {root: this.root, light: null, sprites: this.sprites, rackMin: [0, 0, 0], rackMax: [1, 1, 1], shadowCenter: [0, 1.1, -.2]};
     this.RX = -.58; this.RZ = -.7; this.W = 2.22; this.D = .36;
     this.glowTex = TX.glow(); this.puffTex = TX.puff(); this.flameTex = TX.flame(); this.dustTex = TX.glow();
-    this.buildRoom(); this.buildRack(); this.buildTable(); this.buildExtras(); this.buildDust();
+    this.ready = false; this.lowq = false;
     this.cam = {fov: .62, yaw: -.12, pitch: .1, dist: 6, target: [-.1, 1.1, 0], eye: [0, 1, 5]}; this.goal = {yaw: -.12, pitch: .1, dist: 6, target: [-.1, 1.1, 0]};
-    this.preset("overview", true); this.lastInput = -99; this.bindInput();
+  }
+  /* builds the room in small slices so the page never freezes (important on phones) */
+  async init(progress) {
+    const tick = () => new Promise(r => setTimeout(r, 0));
+    const steps = [() => initMaterials(), () => this.buildRoom(), () => this.buildRack(), () => this.buildTable(), () => this.buildExtras(), () => this.buildDust()];
+    this.batchRoot = new Node(); this.batchItems = new Node(); this.root.add(this.batchRoot); this.root.add(this.batchItems);
+    for (let i = 0; i < steps.length; i++) { progress && progress(i / (steps.length + 2) * .6); await tick(); steps[i](); }
+    this.preset("overview", true); this.lastInput = -99; this.bindInput(); this.ready = true;
+  }
+  /* freeze + batch static geometry, then upload GPU resources in slices */
+  async finish(progress) {
+    const tick = () => new Promise(r => setTimeout(r, 0));
+    this.markDyn(); this.root.update(null);
+    if (!this.staticBatched) {
+      batchNodes(this.root.kids.filter(k => k !== this.batchRoot && k !== this.batchItems), this.batchRoot, {skip: n => n === this.items || (this.wallMat && n.mat === this.wallMat)});
+      this.staticBatched = true;
+    }
+    this.batchItems.kids.length = 0; batchNodes([this.items], this.batchItems);
+    this.freeze(this.root, false); this.root.update(null);
+    const list = []; this.r.collect(this.root, list);
+    const texs = new Set(); list.forEach(n => n.mat.tex && texs.add(n.mat.tex)); [this.glowTex, this.puffTex, this.flameTex, this.dustTex].forEach(t => t && texs.add(t));
+    const all = [...texs]; let i = 0;
+    for (const n of list) { if (!n.mesh) n.mesh = this.r.mesh(n.geo); }
+    while (i < all.length) { for (let k = 0; k < 4 && i < all.length; k++, i++) this.r.tex(all[i]); progress && progress(.6 + .4 * i / all.length); await tick(); }
+    this.shadowKick = true;
+  }
+  markDyn() {
+    const m = (n) => { if (n) n.dyn = true; };
+    this.lamps.forEach(m); (this.clocks || []).forEach(m); (this.globes || []).forEach(m); (this.bulbMesh || []).forEach(m); this.tiles.forEach(t => m(t.group));
+  }
+  freeze(n, anc) {
+    const dyn = anc || n.dyn || !!n.custom; let has = dyn;
+    for (const k of n.kids) has = this.freeze(k, dyn) || has;
+    n.frozen = !has; return has;
+  }
+  setQuality(q) {
+    this.lowq = q === "low"; this.S.noShadows = this.lowq; this.r.shadowReady = false;
+    if (this.dustSprites && this.lowq) this.dustSprites.forEach(s => s.alpha = 0);
   }
   /* ---------------- structure ---------------- */
   add(parent, geo, mat, p, r, s) { const n = nodeOf(geo, mat, p, r, s); parent.add(n); return n; }
@@ -1004,9 +1086,9 @@ class Room {
     const R = this.root;
     const wallG = (w, h, ur, vr) => { const g = new Geo(); g.v(-w / 2, -h / 2, 0, 0, 0, 1, 0, 0); g.v(w / 2, -h / 2, 0, 0, 0, 1, ur, 0); g.v(w / 2, h / 2, 0, 0, 0, 1, ur, vr); g.v(-w / 2, h / 2, 0, 0, 0, 1, 0, vr); g.tri(0, 1, 2); g.tri(0, 2, 3); return g; };
     this.wallMat = Object.assign({tex: TX.plaster("#efe3cf"), uv: [1, 1], rough: .95, spec: .02, env: .02}, {});
-    this.add(R, wallG(14, 4.6, 14 / 1.6, 4.6 / 1.6), this.wallMat, [0, 2.3, -.92]);
-    this.add(R, wallG(8, 4.6, 5, 3), this.wallMat, [-4.6, 2.3, 1.6], [0, Math.PI / 2, 0]);
-    this.add(R, wallG(8, 4.6, 5, 3), this.wallMat, [4.6, 2.3, 1.6], [0, -Math.PI / 2, 0]);
+    this.add(R, wallG(14, 12, 14 / 1.6, 12 / 1.6), this.wallMat, [0, 6, -.92]);
+    this.add(R, wallG(8, 12, 5, 7.5), this.wallMat, [-4.6, 6, 1.6], [0, Math.PI / 2, 0]);
+    this.add(R, wallG(8, 12, 5, 7.5), this.wallMat, [4.6, 6, 1.6], [0, -Math.PI / 2, 0]);
     this.add(R, G.plane(14, 9, [14 * .6, 9 * .6]), MAT.floor, [0, 0, 1.6]);
     /* wainscot + skirting */
     const wp = {color: C("#e9e1d2"), rough: .6, spec: .12, env: .05};
@@ -1121,7 +1203,7 @@ class Room {
   }
   addTile(app, x, y) {
     const S = .235, T = {app, dim: 0, hover: 0, sel: 0, ph: Math.random() * 6};
-    const g = grp([x, y, .035]); this.items.add(g); T.group = g;
+    const g = grp([x, y, .035]); this.items.add(g); T.group = g; g.dyn = true;
     const stand = this.add(g, G.rbox(.14, .04, .07, .008), MAT.oak, [0, .02, .0]);
     const pivot = grp([0, .04, .035]); g.add(pivot); T.pivot = pivot; T.baseRot = -.14;
     pivot.r = [T.baseRot, 0, 0];
@@ -1176,10 +1258,11 @@ class Room {
   buildDust() { this.dust = []; for (let i = 0; i < 70; i++) this.dust.push({p: [(Math.random() - .5) * 4.5, Math.random() * 2.4, -.7 + Math.random() * 2.4], v: [(Math.random() - .5) * .03, .01 + Math.random() * .02, (Math.random() - .5) * .02], s: .01 + Math.random() * .015, ph: Math.random() * 6}); this.dustSprites = this.dust.map(d => ({tex: this.dustTex, pos: d.p.slice(), w: d.s, h: d.s, col: [1, .95, .8], alpha: 0, add: true})); this.dustSprites.forEach(s => this.sprites.push(s)); this.steam = []; for (let i = 0; i < 30; i++) { const s = {tex: this.puffTex, pos: [0, -9, 0], w: .05, h: .05, col: [1, 1, 1], alpha: 0, add: false, life: Math.random() * 3, src: i % 5, vy: 0}; this.steam.push(s); this.sprites.push(s); } this.flameSprites = []; this.glowSprites = []; for (let i = 0; i < 12; i++) { const s = {tex: this.flameTex, pos: [0, -9, 0], w: .03, h: .06, col: [1, .8, .45], alpha: 0, add: true}; this.flameSprites.push(s); this.sprites.push(s); } for (let i = 0; i < 40; i++) { const s = {tex: this.glowTex, pos: [0, -9, 0], w: .1, h: .1, col: [1, .8, .4], alpha: 0, add: true}; this.glowSprites.push(s); this.sprites.push(s); } this.selGlow = {tex: this.glowTex, pos: [0, -9, 0], w: .5, h: .5, col: [1, .85, .55], alpha: 0, add: true}; this.sprites.push(this.selGlow); this.badgeSprites = []; }
   /* ---------------- interaction API ---------------- */
   setMode(m, instant) { this.target = m; this.modeFrom = JSON.parse(JSON.stringify(this.cur)); this.modeT = instant ? 1 : 0; if (instant) this.cur = JSON.parse(JSON.stringify(MODES[m])); this.mode = m; }
+  fovFor(asp) { return asp >= 1 ? .62 : .62 + (1 - asp) * .75; }
   preset(name, instant) {
-    const asp = this.canvas.clientWidth / Math.max(1, this.canvas.clientHeight), f = Math.max(1, 1.5 / asp);
-    const P = {overview: {t: [.0, 1.7, 0], d: 7.3 * f, yaw: -.1, pitch: .08}, rack: {t: [this.RX, 1.35, this.RZ], d: 3.9 * f, yaw: 0, pitch: .06}, table: {t: [1.3, .72, .1], d: 2.35 * Math.max(1, 1.1 / asp), yaw: .14, pitch: .3}, plants: {t: [1.9, 1.0, 0], d: 3.4 * f, yaw: -.35, pitch: .1}}[name];
-    this.goal = {yaw: P.yaw, pitch: P.pitch, dist: P.d, target: P.t.slice()}; this.presetName = name; if (instant) { this.cam.yaw = P.yaw; this.cam.pitch = P.pitch; this.cam.dist = P.d; this.cam.target = P.t.slice(); }
+    const asp = this.canvas.clientWidth / Math.max(1, this.canvas.clientHeight), fov = this.fovFor(asp), fit = (H) => H / (Math.tan(fov / 2) * asp);
+    const P = {overview: {t: [.0, asp < 1 ? 1.45 : 1.7, 0], d: Math.max(7.3, fit(asp < 1 ? 2.4 : 2.9)), yaw: -.1, pitch: asp < 1 ? .12 : .08}, rack: {t: [this.RX, 1.35, this.RZ], d: Math.max(3.9, fit(1.5)), yaw: 0, pitch: .06}, table: {t: [1.3, .72, .1], d: Math.max(2.35, fit(1.1)), yaw: .14, pitch: .3}, plants: {t: [1.9, 1.0, 0], d: Math.max(3.4, fit(1.8)), yaw: -.35, pitch: .1}}[name];
+    this.goal = {yaw: P.yaw, pitch: P.pitch, dist: P.d, target: P.t.slice()}; this.presetName = name; this.cam.fov = fov; if (instant) { this.cam.yaw = P.yaw; this.cam.pitch = P.pitch; this.cam.dist = P.d; this.cam.target = P.t.slice(); }
   }
   tileWorld(T) { const m = T.pivot.world; return M4.pt(m, [0, .1, 0]); }
   select(id, focus = true) {
@@ -1274,12 +1357,16 @@ class Room {
     /* sprites: dust, steam, flames, glows */
     this.updateSprites(dt, time, c);
     /* camera */
-    const k = 1 - Math.exp(-dt * 5), cam = this.cam, g = this.goal;
+    const k = 1 - Math.exp(-dt * 5), cam = this.cam, g = this.goal; cam.fov = this.fovFor(this.canvas.clientWidth / Math.max(1, this.canvas.clientHeight));
     const idle = time - this.lastInput > 4 && !this.sel;
     const sway = idle ? Math.sin(time * .25) * .05 : 0;
     cam.yaw += (g.yaw + sway - cam.yaw) * k; cam.pitch += (g.pitch - cam.pitch) * k; cam.dist += (g.dist - cam.dist) * k; for (let i = 0; i < 3; i++) cam.target[i] += (g.target[i] - cam.target[i]) * k;
     const cp = Math.cos(cam.pitch); cam.eye = [cam.target[0] + Math.sin(cam.yaw) * cp * cam.dist, Math.max(.25, cam.target[1] + Math.sin(cam.pitch) * cam.dist), cam.target[2] + Math.cos(cam.yaw) * cp * cam.dist];
     const light = {sunDir: c.sunDir, sunCol: c.sunCol, sky: c.sky, ground: c.ground, exposure: c.exposure, bg: c.bg, pl: pls};
+    let dirty = this.modeT < 1 || this.shadowKick; this.shadowKick = false;
+    for (const T of this.tiles) if (T.sel > .004 || T.hover > .004 || Math.abs(T.sel - (T.app.id === this.sel ? 1 : 0)) > .004 || Math.abs(T.hover - (T.app.id === this.hover ? 1 : 0)) > .004 || Math.abs(T.dim - (T.dimT || 0)) > .004) dirty = true;
+    for (const g of (this.globes || [])) if (g.spinBoost > .05) dirty = true;
+    this.S.shadowDirty = dirty && !this.lowq; this.S.shadowEvery = 36;
     this.S.light = light; this.wallMat.color = c.wall;
     this.r.render(this.S, cam, time);
   }
@@ -1308,99 +1395,181 @@ class Room {
 function potPlantCactus(R) { const n = grp(); n.add(makePot(.045, .06, MAT.terra, "round")); const c = cactus(R, .13); c.p = [0, .055, 0]; n.add(c); return n; }
 
 /* ============================================================
-   Store UI: state, i18n, details panel, list view, install flow
+   Store UI: accounts, details panel, list view, install flow
    ============================================================ */
 "use strict";
 const I18N = {
-  en: {shelf: "Shelf", list: "All apps", search: "Search apps…", all: "All", hint: "Drag to look around · scroll to zoom · click an app", install: "Install", update: "Update", open: "Installed ✓", downloading: "Downloading…", about: "About this app", whatsNew: "What's new", reviews: "Ratings & reviews", perms: "Permissions", similar: "Similar apps", info: "App info", version: "Version", size: "Size", android: "Requires", updated: "Updated", package: "Package", category: "Category", developer: "Developer", downloads: "Downloads", price: "Price", free: "Free", share: "Share", copied: "Link copied", wish: "Added to wishlist", unwish: "Removed from wishlist", writeRev: "Write a review", yourName: "Your name", yourRev: "Share your experience…", submit: "Submit", thanks: "Thanks for your review!", noRev: "No reviews yet — be the first.", sortPop: "Most popular", sortTop: "Top rated", sortNew: "Newest", sortAz: "A–Z", wishlist: "♥ Wishlist", installed: "Installed", none: "No apps found.", featured: "Featured", newb: "New", upd: "Update available", presets: {overview: "Room", rack: "Shelf", table: "Tea table", plants: "Plants"}, installedToast: "Installed! (APK download started)", previewToast: "Preview only — the real site downloads the APK.", teapot: "☕ Chai ready!", globe: "🌍 Spinning the globe", clock: "🕰 Tick tock", lamp: "💡 Lamp", noGl: "Your browser doesn't support WebGL2 — showing the list view.", more: "More", less: "Less", rate: "Your rating", ratings: "ratings", empty: "Empty", reviewsBy: "reviews"},
-  bn: {shelf: "তাক", list: "সব অ্যাপ", search: "অ্যাপ খুঁজুন…", all: "সব", hint: "ঘোরাতে ড্র্যাগ করুন · জুম করতে স্ক্রল · অ্যাপে ক্লিক করুন", install: "ইনস্টল", update: "আপডেট", open: "ইনস্টল করা ✓", downloading: "ডাউনলোড হচ্ছে…", about: "অ্যাপ সম্পর্কে", whatsNew: "নতুন কী", reviews: "রেটিং ও রিভিউ", perms: "পারমিশন", similar: "অনুরূপ অ্যাপ", info: "অ্যাপের তথ্য", version: "ভার্সন", size: "সাইজ", android: "প্রয়োজন", updated: "আপডেট", package: "প্যাকেজ", category: "ক্যাটাগরি", developer: "ডেভেলপার", downloads: "ডাউনলোড", price: "মূল্য", free: "ফ্রি", share: "শেয়ার", copied: "লিংক কপি হয়েছে", wish: "উইশলিস্টে যোগ হয়েছে", unwish: "উইশলিস্ট থেকে সরানো হয়েছে", writeRev: "রিভিউ লিখুন", yourName: "আপনার নাম", yourRev: "আপনার অভিজ্ঞতা লিখুন…", submit: "জমা দিন", thanks: "ধন্যবাদ!", noRev: "এখনো কোনো রিভিউ নেই।", sortPop: "জনপ্রিয়", sortTop: "সেরা রেটিং", sortNew: "নতুন", sortAz: "A–Z", wishlist: "♥ উইশলিস্ট", installed: "ইনস্টল করা", none: "কোনো অ্যাপ পাওয়া যায়নি।", featured: "ফিচার্ড", newb: "নতুন", upd: "আপডেট আছে", presets: {overview: "ঘর", rack: "তাক", table: "চায়ের টেবিল", plants: "গাছ"}, installedToast: "ইনস্টল হয়েছে! (APK ডাউনলোড শুরু)", previewToast: "এটি প্রিভিউ — আসল সাইটে APK ডাউনলোড হবে।", teapot: "☕ চা তৈরি!", globe: "🌍 গ্লোব ঘুরছে", clock: "🕰 টিক টক", lamp: "💡 ল্যাম্প", noGl: "আপনার ব্রাউজারে WebGL2 নেই — লিস্ট ভিউ দেখানো হচ্ছে।", more: "আরও", less: "কম", rate: "আপনার রেটিং", ratings: "রেটিং", empty: "খালি", reviewsBy: "রিভিউ"}
+  en: {shelf: "Shelf", list: "All apps", search: "Search apps…", all: "All", hint: "Drag to look around · scroll to zoom · click an app", install: "Install", update: "Update", open: "Installed ✓", downloading: "Downloading…", about: "About this app", whatsNew: "What's new", reviews: "Ratings & reviews", perms: "Permissions", similar: "Similar apps", info: "App info", version: "Version", size: "Size", android: "Requires", updated: "Updated", package: "Package", category: "Category", developer: "Developer", downloads: "Downloads", price: "Price", free: "Free", share: "Share", copied: "Link copied", wish: "Added to wishlist", unwish: "Removed from wishlist", writeRev: "Write a review", yourName: "Your name", yourRev: "Share your experience…", submit: "Submit", thanks: "Thanks for your review!", noRev: "No reviews yet — be the first.", sortPop: "Most popular", sortTop: "Top rated", sortNew: "Newest", sortAz: "A–Z", wishlist: "♥ Wishlist", installed: "Installed", none: "No apps found.", featured: "Featured", newb: "New", upd: "Update available", presets: {overview: "Room", rack: "Shelf", table: "Tea table", plants: "Plants"}, installedToast: "Installed! (APK download started)", previewToast: "Preview only — the real site downloads the APK.", teapot: "☕ Chai ready!", globe: "🌍 Spinning the globe", clock: "🕰 Tick tock", lamp: "💡 Lamp", noGl: "Your browser doesn't support WebGL2 — showing the list view.", more: "More", less: "Less", rate: "Your rating", ratings: "ratings", empty: "Empty", reviewsBy: "reviews", account: "Account", guest: "Guest", login: "Log in", logout: "Sign out", adminPanel: "Admin panel", language: "Language", sound: "Sound", on: "On", off: "Off", quality: "3D quality", qAuto: "Auto", qLow: "Smooth", qHigh: "HD", loginToReview: "Log in to write a review", yourReview: "Your review", del: "Delete", noApps: "No apps yet.", signedOut: "Signed out", welcomeBack: "Welcome", retry: "Retry", connectFail: "Could not connect to the server.", loadingStore: "Building your shelf…", needRating: "Pick a star rating first", reviewLogin: "Log in required"},
+  bn: {shelf: "তাক", list: "সব অ্যাপ", search: "অ্যাপ খুঁজুন…", all: "সব", hint: "ঘোরাতে ড্র্যাগ করুন · জুম করতে স্ক্রল · অ্যাপে ক্লিক করুন", install: "ইনস্টল", update: "আপডেট", open: "ইনস্টল করা ✓", downloading: "ডাউনলোড হচ্ছে…", about: "অ্যাপ সম্পর্কে", whatsNew: "নতুন কী", reviews: "রেটিং ও রিভিউ", perms: "পারমিশন", similar: "অনুরূপ অ্যাপ", info: "অ্যাপের তথ্য", version: "ভার্সন", size: "সাইজ", android: "প্রয়োজন", updated: "আপডেট", package: "প্যাকেজ", category: "ক্যাটাগরি", developer: "ডেভেলপার", downloads: "ডাউনলোড", price: "মূল্য", free: "ফ্রি", share: "শেয়ার", copied: "লিংক কপি হয়েছে", wish: "উইশলিস্টে যোগ হয়েছে", unwish: "উইশলিস্ট থেকে সরানো হয়েছে", writeRev: "রিভিউ লিখুন", yourName: "আপনার নাম", yourRev: "আপনার অভিজ্ঞতা লিখুন…", submit: "জমা দিন", thanks: "ধন্যবাদ!", noRev: "এখনো কোনো রিভিউ নেই।", sortPop: "জনপ্রিয়", sortTop: "সেরা রেটিং", sortNew: "নতুন", sortAz: "A–Z", wishlist: "♥ উইশলিস্ট", installed: "ইনস্টল করা", none: "কোনো অ্যাপ পাওয়া যায়নি।", featured: "ফিচার্ড", newb: "নতুন", upd: "আপডেট আছে", presets: {overview: "ঘর", rack: "তাক", table: "চায়ের টেবিল", plants: "গাছ"}, installedToast: "ইনস্টল হয়েছে! (APK ডাউনলোড শুরু)", previewToast: "এটি প্রিভিউ — আসল সাইটে APK ডাউনলোড হবে।", teapot: "☕ চা তৈরি!", globe: "🌍 গ্লোব ঘুরছে", clock: "🕰 টিক টক", lamp: "💡 ল্যাম্প", noGl: "আপনার ব্রাউজারে WebGL2 নেই — লিস্ট ভিউ দেখানো হচ্ছে।", more: "আরও", less: "কম", rate: "আপনার রেটিং", ratings: "রেটিং", empty: "খালি", reviewsBy: "রিভিউ", account: "অ্যাকাউন্ট", guest: "গেস্ট", login: "লগইন", logout: "সাইন আউট", adminPanel: "অ্যাডমিন প্যানেল", language: "ভাষা", sound: "সাউন্ড", on: "চালু", off: "বন্ধ", quality: "৩ডি কোয়ালিটি", qAuto: "অটো", qLow: "স্মুথ", qHigh: "এইচডি", loginToReview: "রিভিউ লিখতে লগইন করুন", yourReview: "আপনার রিভিউ", del: "মুছুন", noApps: "এখনো কোনো অ্যাপ নেই।", signedOut: "সাইন আউট হয়েছে", welcomeBack: "স্বাগতম", retry: "আবার চেষ্টা", connectFail: "সার্ভারে সংযোগ হয়নি।", loadingStore: "তাক তৈরি হচ্ছে…", needRating: "আগে তারকা দিন", reviewLogin: "লগইন প্রয়োজন"}
 };
 const $ = (s, r = document) => r.querySelector(s), $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
-const LS = {get(k, d) { try { const v = localStorage.getItem("apkstore." + k); return v ? JSON.parse(v) : d; } catch (e) { return d; } }, set(k, v) { try { localStorage.setItem("apkstore." + k, JSON.stringify(v)); } catch (e) {} }};
+const LS = {get(k, d) { try { const v = localStorage.getItem("apkstore." + k); return v ? JSON.parse(v) : d; } catch (e) { return d; } }, set(k, v) { try { localStorage.setItem("apkstore." + k, JSON.stringify(v)); } catch (e) {} }, del(k) { try { localStorage.removeItem("apkstore." + k); } catch (e) {} }};
+const SS = {get(k) { try { return sessionStorage.getItem("apkstore." + k); } catch (e) { return null; } }, set(k, v) { try { sessionStorage.setItem("apkstore." + k, v); } catch (e) {} }};
 
 class Store {
-  constructor(data) {
-    this.D = data; this.apps = (data.apps || []).map((a, i) => Object.assign({developer: data.developer || "", featured: false, permissions: [], reviews: [], ratingCount: 0}, a, {_i: i}));
+  constructor() {
+    const CFG = window.STORE_CONFIG || {}; this.CFG = CFG; this.B = window.Backend;
+    this.name = CFG.storeName || (window.__DATA && window.__DATA.storeName) || "APK Store";
+    this.apps = []; this.user = null; this.guest = SS.get("guest") === "1"; this.forceAuth = false;
     this.lang = LS.get("lang", /^bn/i.test(navigator.language) ? "bn" : "en"); this.q = ""; this.cat = "all"; this.sort = "pop"; this.fWish = false; this.fInst = false; this.view = "shelf";
-    this.wish = LS.get("wish", []); this.inst = LS.get("inst", {}); this.myRev = LS.get("rev", {}); this.sel = null; this.soundOn = LS.get("snd", true);
-    this.mode = LS.get("mode", null) || this.autoMode();
-    this.init();
+    this.wish = LS.get("wish", []); this.inst = LS.get("inst", {}); this.sel = null; this.soundOn = LS.get("snd", true);
+    this.mode = LS.get("mode", null) || this.autoMode(); this.revs = {}; this.shots = {};
+    this.quality = LS.get("q", "auto"); this.sceneReady = false; this.canGL = !!document.createElement("canvas").getContext("webgl2");
+    this.appsReady = new Promise(r => { this._appsRes = r; });
   }
   t(k) { return I18N[this.lang][k] != null ? I18N[this.lang][k] : I18N.en[k]; }
   autoMode() { const h = new Date().getHours(); return h >= 6 && h < 17 ? "day" : h < 19 ? "evening" : "night"; }
   num(s) { const m = String(s || "0").replace(/,/g, "").match(/([\d.]+)\s*([KMB]?)/i); if (!m) return 0; return parseFloat(m[1]) * ({K: 1e3, M: 1e6, B: 1e9}[m[2].toUpperCase()] || 1); }
   isNew(a) { return a.updated && (Date.now() - new Date(a.updated).getTime()) < 30 * 864e5; }
+  norm(a) { return Object.assign({developer: "", featured: false, permissions: [], whatsNew: [], ratingCount: 0, category: "Apps", price: "Free", version: "1.0.0", size: "", rating: 0, downloads: ""}, a); }
   filtered() {
     const q = this.q.trim().toLowerCase();
-    let r = this.apps.filter(a => (this.cat === "all" || a.category === this.cat) && (!q || [a.name, a.tagline, a.category, a.developer, a.description].join(" ").toLowerCase().includes(q)) && (!this.fWish || this.wish.includes(a.id)) && (!this.fInst || this.inst[a.id]));
-    const S = {pop: (a, b) => this.num(b.downloads) - this.num(a.downloads), top: (a, b) => (b.rating || 0) - (a.rating || 0), new: (a, b) => String(b.updated).localeCompare(String(a.updated)), az: (a, b) => a.name.localeCompare(b.name)};
+    const r = this.apps.filter(a => (this.cat === "all" || a.category === this.cat) && (!q || [a.name, a.tagline, a.category, a.developer, a.description].join(" ").toLowerCase().includes(q)) && (!this.fWish || this.wish.includes(a.id)) && (!this.fInst || this.inst[a.id]));
+    const S = {pop: (a, b) => this.num(b.downloads) - this.num(a.downloads) || (b.order || 0) - (a.order || 0), top: (a, b) => (b.rating || 0) - (a.rating || 0), new: (a, b) => String(b.updated).localeCompare(String(a.updated)) || (b.order || 0) - (a.order || 0), az: (a, b) => a.name.localeCompare(b.name)};
     return r.sort(S[this.sort] || S.pop);
   }
-  /* ---------- init ---------- */
-  init() {
-    document.title = this.D.storeName || "APK Store"; $("#storeName").textContent = this.D.storeName || "APK Store";
+  /* ---------------- start ---------------- */
+  async start() {
+    document.title = this.name; $("#storeName").textContent = this.name;
     this.bindUI(); this.applyLang(); this.setMode(this.mode, true);
-    this.canGL = !!document.createElement("canvas").getContext("webgl2");
-    const boot = () => { const b = $("#boot"); b.style.opacity = 0; setTimeout(() => b.remove(), 900); };
-    const fonts = document.fonts && document.fonts.load ? Promise.race([Promise.all([document.fonts.load('700 30px "DM Sans"'), document.fonts.load('700 30px "Noto Sans Bengali"')]), new Promise(r => setTimeout(r, 1800))]) : Promise.resolve();
-    fonts.then(() => {
-      if (this.canGL) {
-        try { this.makeRoom(); } catch (e) { console.error(e); this.canGL = false; }
-      }
-      if (!this.canGL) { this.showView("list"); $("#viewSeg").style.display = "none"; $("#presets").style.display = "none"; $("#hint").remove(); this.toast(this.t("noGl"), 4000); }
-      this.refresh(); boot();
-      const id = decodeURIComponent((location.hash.match(/app=([^&]+)/) || [])[1] || ""); if (id && this.apps.find(a => a.id === id)) setTimeout(() => this.open(id), 600);
-    });
+    if (!this.canGL) { this.showView("list"); $("#viewSeg").style.display = "none"; $("#presets").style.display = "none"; $("#hint") && $("#hint").remove(); }
+    try { await this.B.init(); } catch (e) { console.error(e); return this.bootFail(e); }
+    this.B.onAuth((u) => this.onAuth(u));
+    this.B.watchApps((list, err) => this.setApps(list, err));
+    if (this.canGL) this.initScene(); else { this.sceneReady = true; }
+    this.gate();
+    const id = decodeURIComponent((location.hash.match(/app=([^&]+)/) || [])[1] || ""); if (id) this.appsReady.then(() => { if (this.apps.find(a => a.id === id)) this.open(id); });
   }
-  makeRoom() {
+  bootFail(e) { $("#boot").innerHTML = `<div><div style="font-size:42px">📡</div><p style="margin:10px 0 14px">${esc(this.t("connectFail"))}</p><button class="btn main" id="retry">${esc(this.t("retry"))}</button></div>`; $("#retry").onclick = () => location.reload(); }
+  progress(p) { this._p = p; const b = $("#bootBar"); if (b) b.style.width = Math.round(p * 100) + "%"; if (this.authCtl) this.authCtl.progress(p); }
+  gate() {
+    const needAuth = !this.user && ((!this.guest || this.forceAuth) || this.CFG.allowGuest === false);
+    const au = $("#auth");
+    if (needAuth) {
+      if (!this.authCtl) { au.hidden = false; this.authCtl = AuthView.mount(au, {lang: this.lang, title: this.name, allowGuest: this.CFG.allowGuest !== false, onSuccess: () => { this.forceAuth = false; this.gate(); }, onGuest: () => { this.guest = true; this.forceAuth = false; SS.set("guest", "1"); this.gate(); }}); this.authCtl.progress(this._p || 0); }
+      au.hidden = false;
+    } else { au.hidden = true; if (this.authCtl) { au.innerHTML = ""; this.authCtl = null; } }
+    const boot = $("#boot"); if (boot) { const show = !needAuth && !this.sceneReady && (this.canGL !== false); boot.style.opacity = show ? 1 : 0; boot.style.pointerEvents = show ? "auto" : "none"; if (!show) setTimeout(() => { const b = $("#boot"); if (b && b.style.opacity === "0") b.remove(); }, 900); }
+    this.paintMe();
+  }
+  openAuth() { this.forceAuth = true; $("#menu").hidden = true; if (this.authCtl) { $("#auth").innerHTML = ""; this.authCtl = null; } this.gate(); }
+  async onAuth(u) {
+    const was = this.user; this.user = u;
+    if (u) { this.guest = false; SS.set("guest", "0"); this.forceAuth = false; await this.loadUserData(); }
+    else if (was) { LS.del("wish"); LS.del("inst"); this.wish = []; this.inst = {}; this.refresh(); if (this.sel) this.renderPanel(); }
+    this.gate(); if (this.sel) this.renderPanel();
+  }
+  async loadUserData() {
+    const u = this.user; if (!u) return; const d = await this.B.getUserData(u.uid) || {};
+    const wish = [...new Set([...(Array.isArray(d.wish) ? d.wish : []), ...this.wish])], inst = Object.assign({}, this.inst, d.inst || {});
+    const changed = JSON.stringify(wish.slice().sort()) !== JSON.stringify((d.wish || []).slice().sort()) || JSON.stringify(inst) !== JSON.stringify(d.inst || {});
+    this.wish = wish; this.inst = inst; LS.set("wish", wish); LS.set("inst", inst); if (changed) this.saveUser(true); this.refresh();
+  }
+  saveUser(now) { LS.set("wish", this.wish); LS.set("inst", this.inst); if (!this.user) return; clearTimeout(this._su); const go = () => this.B.setUserData(this.user.uid, {wish: this.wish, inst: this.inst}); if (now) go(); else this._su = setTimeout(go, 700); }
+  setApps(list, err) {
+    this.apps = (list || []).map(a => this.norm(a)); this._appsRes(); this.refresh();
+    if (this.sel && !this.apps.find(a => a.id === this.sel)) this.close();
+    this.syncRoom();
+  }
+  /* ---------------- 3D scene ---------------- */
+  async initScene() {
     const mobile = matchMedia("(max-width:720px)").matches || /Mobi|Android/i.test(navigator.userAgent);
-    const room = this.room = new Room($("#c"), {mobile, storeName: (this.D.storeName || "APK Store").toUpperCase()});
-    room.cb.pick = (id) => { this.open(id); this.sfx("pick"); };
-    room.cb.bg = () => { if (this.sel) this.close(); };
-    room.cb.hot = (k) => { this.toast(this.t(k)); this.sfx(k); };
-    room.cb.hover = (id, x, y) => { const tip = $("#tip"); if (!id) { tip.style.opacity = 0; return; } const a = this.apps.find(z => z.id === id); if (!a) return; tip.innerHTML = esc(a.name) + "<small>" + esc(a.category) + " · ★ " + esc(a.rating) + "</small>"; tip.style.left = x + "px"; tip.style.top = y + "px"; tip.style.opacity = 1; if (this._hv !== id) { this._hv = id; this.sfx("tick"); } };
-    room.buildApps(this.apps); room.setMode(this.mode, true);
-    let t0 = performance.now(), last = t0; const loop = (now) => { const dt = Math.min(.05, (now - last) / 1000); last = now; if (!document.hidden && this.view === "shelf") room.update(dt, (now - t0) / 1000); requestAnimationFrame(loop); }; requestAnimationFrame(loop);
-    $("#presets").innerHTML = ["overview", "rack", "table", "plants"].map(k => `<button data-p="${k}">${esc(this.t("presets")[k])}</button>`).join("");
-    $$("#presets button").forEach(b => b.onclick = () => { if (this.sel) this.close(); room.preset(b.dataset.p); room.lastInput = performance.now() / 1000; this.markPreset(b.dataset.p); this.sfx("tick"); });
-    this.markPreset("overview");
-    setTimeout(() => { const h = $("#hint"); if (h) h.style.opacity = 0; }, 7000);
+    const weak = (navigator.deviceMemory && navigator.deviceMemory <= 4) || (navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 4);
+    const lite = this.quality === "low" || (this.quality === "auto" && (mobile || weak)); this.lite = lite; TX.Q = lite ? .5 : 1;
+    try {
+      const fonts = document.fonts && document.fonts.load ? Promise.race([Promise.all([document.fonts.load('700 30px "DM Sans"'), document.fonts.load('700 30px "Noto Sans Bengali"')]), new Promise(r => setTimeout(r, 1500))]) : Promise.resolve(); await fonts;
+      const room = this.room = new Room($("#c"), {mobile, lite, storeName: this.name.toUpperCase()});
+      room.cb.pick = (id) => { this.open(id); this.sfx("pick"); };
+      room.cb.bg = () => { if (this.sel) this.close(); };
+      room.cb.hot = (k) => { this.toast(this.t(k)); this.sfx(k); };
+      room.cb.hover = (id, x, y) => { const tip = $("#tip"); if (!id) { tip.style.opacity = 0; return; } const a = this.apps.find(z => z.id === id); if (!a) return; tip.innerHTML = esc(a.name) + "<small>" + esc(a.category) + " · ★ " + esc(a.rating) + "</small>"; tip.style.left = x + "px"; tip.style.top = y + "px"; tip.style.opacity = 1; if (this._hv !== id) { this._hv = id; this.sfx("tick"); } };
+      await room.init((p) => this.progress(p * .6));
+      await Promise.race([this.appsReady, new Promise(r => setTimeout(r, 2500))]);
+      room.buildApps(this.apps); await room.finish((p) => this.progress(.6 + p * .4));
+      room.setMode(this.mode, true); if (this.quality === "low") { room.setQuality("low"); room.r.scale = .75; } 
+      $("#presets").innerHTML = ["overview", "rack", "table", "plants"].map(k => `<button data-p="${k}">${esc(this.t("presets")[k])}</button>`).join("");
+      $$("#presets button").forEach(b => b.onclick = () => { if (this.sel) this.close(); room.preset(b.dataset.p); room.lastInput = performance.now() / 1000; this.markPreset(b.dataset.p); this.sfx("tick"); });
+      this.markPreset("overview"); this.refresh(); this.sceneReady = true; this.progress(1); this.startLoop(); this.gate();
+      setTimeout(() => { const h = $("#hint"); if (h) h.style.opacity = 0; }, 7000);
+    } catch (e) {
+      console.error(e); this.canGL = false; this.sceneReady = true; this.room = null; this.showView("list"); $("#viewSeg").style.display = "none"; $("#presets").style.display = "none"; this.toast(this.t("noGl"), 4000); this.gate();
+    }
+  }
+  async syncRoom() {
+    if (!this.room || !this.room.ready || !this.sceneReady) return; if (this.syncing) { this.pendingSync = true; return; }
+    this.syncing = true; try { do { this.pendingSync = false; await new Promise(r => setTimeout(r, 250)); this.room.buildApps(this.apps); await this.room.finish(); this.room.setMode(this.mode, true); this.refresh(); } while (this.pendingSync); } catch (e) { console.error(e); } this.syncing = false;
+  }
+  startLoop() {
+    const room = this.room, lite = this.lite, cap = lite ? 1000 / 31 : 0, target = lite ? 34 : 17; let last = performance.now(), t0 = last, lastR = 0, ema = target, n = 0, cool = 0;
+    const loop = (now) => {
+      requestAnimationFrame(loop); if (document.hidden || this.view !== "shelf") { last = now; return; }
+      if (cap && now - lastR < cap - 3) return;
+      const dt = Math.min(.05, (now - last) / 1000), ms = now - (lastR || now - target); last = now; lastR = now;
+      room.update(dt, (now - t0) / 1000); n++;
+      if (n > 12) { ema = ema * .92 + Math.min(ms, 200) * .08; cool--; if (cool <= 0 && n % 12 === 0) {
+        const sc = room.r.scale || 1;
+        if (ema > target * 1.45 && sc > .5) { room.r.scale = Math.max(.5, sc * .82); cool = 25; ema = target * 1.2; if (room.r.scale <= .55 && !room.lowq) room.setQuality("low"); }
+        else if (ema < target * 1.1 && sc < (this.quality === "low" ? .75 : 1) && !room.lowq) { room.r.scale = Math.min(1, sc * 1.08); cool = 60; } } }
+    };
+    requestAnimationFrame(loop);
   }
   markPreset(n) { $$("#presets button").forEach(b => b.classList.toggle("on", b.dataset.p === n)); }
-  /* ---------- UI bindings ---------- */
+  /* ---------------- UI bindings ---------------- */
   bindUI() {
     $("#q").oninput = (e) => { this.q = e.target.value; this.refresh(); this.suggest(); };
     $("#q").onfocus = () => this.suggest(); $("#q").onblur = () => setTimeout(() => $("#sugg").style.display = "none", 160);
     $("#q").onkeydown = (e) => { if (e.key === "Enter") { const f = this.filtered(); if (f[0]) { this.open(f[0].id); $("#q").blur(); } } };
     $$("#viewSeg button").forEach(b => b.onclick = () => this.showView(b.dataset.v));
     $$("#modeSeg button").forEach(b => b.onclick = () => this.setMode(b.dataset.m));
-    $("#lang").onclick = () => { this.lang = this.lang === "en" ? "bn" : "en"; LS.set("lang", this.lang); this.applyLang(); this.refresh(); if (this.sel) this.renderPanel(); this.sfx("tick"); };
-    $("#snd").onclick = () => { this.soundOn = !this.soundOn; LS.set("snd", this.soundOn); $("#snd").textContent = this.soundOn ? "🔊" : "🔇"; this.sfx("tick"); };
-    $("#snd").textContent = this.soundOn ? "🔊" : "🔇";
+    $("#me").onclick = (e) => { e.stopPropagation(); this.toggleMenu(); };
+    document.addEventListener("click", (e) => { const m = $("#menu"); if (!m.hidden && !m.contains(e.target) && e.target !== $("#me")) m.hidden = true; });
     $("#pclose").onclick = () => this.close();
     $("#sort").onchange = (e) => { this.sort = e.target.value; this.refresh(); };
     $("#fWish").onclick = () => { this.fWish = !this.fWish; this.refresh(); }; $("#fInst").onclick = () => { this.fInst = !this.fInst; this.refresh(); };
     $("#lb").onclick = () => $("#lb").classList.remove("show");
-    addEventListener("keydown", (e) => { if (e.key === "Escape") { $("#lb").classList.remove("show"); if (this.sel) this.close(); } });
+    addEventListener("keydown", (e) => { if (e.key === "Escape") { $("#lb").classList.remove("show"); $("#menu").hidden = true; if (this.sel) this.close(); } });
+  }
+  paintMe() { const b = $("#me"); if (!b) return; const u = this.user; b.textContent = u ? (u.name || u.email || "U").trim().charAt(0).toUpperCase() : "👤"; b.classList.toggle("in", !!u); }
+  toggleMenu() { const m = $("#menu"); if (m.hidden) { this.renderMenu(); m.hidden = false; } else m.hidden = true; }
+  renderMenu() {
+    const m = $("#menu"), u = this.user, T = (k) => esc(this.t(k)), showAdmin = this.B.mode === "local" || (u && u.isAdmin);
+    m.innerHTML = `<div class="who"><b>${u ? esc(u.name) : T("guest")}</b><span>${u ? esc(u.email) : ""}</span></div>
+      ${u ? "" : `<button id="mLogin">${T("login")} <small>→</small></button>`}
+      ${showAdmin ? `<button id="mAdmin">${T("adminPanel")} <small>⚙</small></button>` : ""}
+      <div class="lbl">${T("language")}</div><div class="seg2"><button data-l="en" class="${this.lang === "en" ? "on" : ""}">English</button><button data-l="bn" class="${this.lang === "bn" ? "on" : ""}">বাংলা</button></div>
+      <button id="mSnd">${T("sound")} <small>${this.soundOn ? T("on") : T("off")}</small></button>
+      ${this.canGL ? `<div class="lbl">${T("quality")}</div><div class="seg2"><button data-q="auto" class="${this.quality === "auto" ? "on" : ""}">${T("qAuto")}</button><button data-q="low" class="${this.quality === "low" ? "on" : ""}">${T("qLow")}</button><button data-q="high" class="${this.quality === "high" ? "on" : ""}">${T("qHigh")}</button></div>` : ""}
+      ${u ? `<button id="mOut">${T("logout")} <small>↩</small></button>` : ""}`;
+    $$("[data-l]", m).forEach(b => b.onclick = () => { this.lang = b.dataset.l; LS.set("lang", this.lang); this.applyLang(); this.refresh(); if (this.sel) this.renderPanel(); this.renderMenu(); this.sfx("tick"); });
+    $$("[data-q]", m).forEach(b => b.onclick = () => { if (this.quality === b.dataset.q) return; LS.set("q", b.dataset.q); location.reload(); });
+    $("#mSnd", m).onclick = () => { this.soundOn = !this.soundOn; LS.set("snd", this.soundOn); this.renderMenu(); this.sfx("tick"); };
+    const lg = $("#mLogin", m); if (lg) lg.onclick = () => this.openAuth();
+    const ad = $("#mAdmin", m); if (ad) ad.onclick = () => { m.hidden = true; this.openAdmin(); };
+    const out = $("#mOut", m); if (out) out.onclick = async () => { m.hidden = true; await this.B.signOut(); this.guest = false; SS.set("guest", "0"); this.gate(); this.toast(this.t("signedOut")); };
+  }
+  openAdmin() {
+    if (!window.__PREVIEW) { location.href = "admin.html"; return; }
+    const ov = $("#adminOverlay"); ov.hidden = false; if (this._adm) this._adm.destroy(); this._adm = Admin.mount(ov, {onExit: () => { ov.hidden = true; this._adm.destroy(); this._adm = null; }});
   }
   applyLang() {
     document.documentElement.lang = this.lang; $("#q").placeholder = this.t("search");
-    $$("[data-t]").forEach(el => el.textContent = this.t(el.dataset.t)); $("#lang").textContent = this.lang === "en" ? "বা" : "EN";
+    $$("[data-t]").forEach(el => el.textContent = this.t(el.dataset.t));
     $("#sort").innerHTML = [["pop", "sortPop"], ["top", "sortTop"], ["new", "sortNew"], ["az", "sortAz"]].map(([v, k]) => `<option value="${v}" ${this.sort === v ? "selected" : ""}>${esc(this.t(k))}</option>`).join("");
     $("#fWish").textContent = this.t("wishlist"); $("#fInst").textContent = this.t("installed");
     if (this.room) $$("#presets button").forEach(b => b.textContent = this.t("presets")[b.dataset.p]);
+    const bt = $("#bootT"); if (bt) bt.textContent = this.t("loadingStore");
   }
   setMode(m, quiet) { this.mode = m; LS.set("mode", m); document.body.classList.remove("day", "evening", "night"); document.body.classList.add(m); $$("#modeSeg button").forEach(b => b.classList.toggle("on", b.dataset.m === m)); if (this.room) this.room.setMode(m); if (!quiet) this.sfx("tick"); }
-  showView(v) { this.view = v; $$("#viewSeg button").forEach(b => b.classList.toggle("on", b.dataset.v === v)); $("#list").classList.toggle("show", v === "list"); if (v === "list" && this.sel) { /* keep panel */ } }
+  showView(v) { this.view = v; $$("#viewSeg button").forEach(b => b.classList.toggle("on", b.dataset.v === v)); $("#list").classList.toggle("show", v === "list"); }
   refresh() {
     const cats = ["all", ...new Set(this.apps.map(a => a.category).filter(Boolean))];
     $("#chips").innerHTML = cats.map(c => `<button class="chip ${this.cat === c ? "on" : ""}" data-c="${esc(c)}">${esc(c === "all" ? this.t("all") : c)}</button>`).join("");
     $$("#chips .chip").forEach(b => b.onclick = () => { this.cat = b.dataset.c; this.refresh(); this.sfx("tick"); });
     $("#fWish").classList.toggle("on", this.fWish); $("#fInst").classList.toggle("on", this.fInst);
     const f = this.filtered(), ids = new Set(f.map(a => a.id));
-    if (this.room) this.room.setDim(a => ids.has(a.id));
-    $("#grid").innerHTML = f.length ? f.map(a => `<button class="card glass" data-id="${esc(a.id)}"><img src="${esc(a.icon)}" alt="" loading="lazy"><div><b>${esc(a.name)}</b><span>${esc(a.category)} · ${esc(a.size)}</span><span>★ ${esc(a.rating)} · ${esc(a.downloads)}</span>${this.inst[a.id] ? `<span style="color:var(--acc);font-weight:700">${esc(this.t("installed"))}</span>` : ""}</div></button>`).join("") : `<div class="empty">${esc(this.t("none"))}</div>`;
+    if (this.room && this.room.ready) this.room.setDim(a => ids.has(a.id));
+    $("#grid").innerHTML = f.length ? f.map(a => `<button class="card glass" data-id="${esc(a.id)}"><img src="${esc(a.icon)}" alt="" loading="lazy"><div><b>${esc(a.name)}</b><span>${esc(a.category)} · ${esc(a.size)}</span><span>★ ${esc(a.rating)} · ${esc(a.downloads)}</span>${this.inst[a.id] ? `<span style="color:var(--acc);font-weight:700">${esc(this.t("installed"))}</span>` : ""}</div></button>`).join("") : `<div class="empty">${esc(this.apps.length ? this.t("none") : this.t("noApps"))}</div>`;
     $$("#grid .card").forEach(c => c.onclick = () => this.open(c.dataset.id));
   }
   suggest() {
@@ -1408,60 +1577,68 @@ class Store {
     const f = this.filtered().slice(0, 5); box.innerHTML = f.map(a => `<button data-id="${esc(a.id)}"><img src="${esc(a.icon)}" alt=""><span><b>${esc(a.name)}</b><br><small style="color:var(--mut)">${esc(a.category)}</small></span></button>`).join("");
     box.style.display = f.length ? "block" : "none"; $$("#sugg button").forEach(b => b.onmousedown = (e) => { e.preventDefault(); this.open(b.dataset.id); box.style.display = "none"; });
   }
-  /* ---------- details ---------- */
+  /* ---------------- details ---------------- */
   open(id) {
     const a = this.apps.find(x => x.id === id); if (!a) return; this.sel = id; this.expanded = false;
-    if (this.room) { this.room.select(id, this.view === "shelf"); this.markPreset(null); if (innerWidth > 720 && this.view === "shelf") this.room.goal.target[0] += this.room.goal.dist * .21; if (innerWidth <= 720 && this.view === "shelf") this.room.goal.target[1] -= this.room.goal.dist * .2; }
+    if (this.room && this.room.ready) { this.room.select(id, this.view === "shelf"); this.markPreset(null); if (innerWidth > 720 && this.view === "shelf") this.room.goal.target[0] += this.room.goal.dist * .21; if (innerWidth <= 720 && this.view === "shelf") this.room.goal.target[1] -= this.room.goal.dist * .2; }
     this.renderPanel(); $("#panel").classList.add("open"); try { history.replaceState(null, "", "#app=" + encodeURIComponent(id)); } catch (e) {}
+    this.loadShots(a); this.loadReviews(a);
   }
-  close() { this.sel = null; $("#panel").classList.remove("open"); if (this.room) { this.room.select(null, false); this.room.preset("overview"); this.markPreset("overview"); } try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {} }
-  reviewsOf(a) { return [...(this.myRev[a.id] || []), ...(a.reviews || [])]; }
+  close() { this.sel = null; $("#panel").classList.remove("open"); if (this.room && this.room.ready) { this.room.select(null, false); this.room.preset("overview"); this.markPreset("overview"); } try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {} }
+  async loadShots(a) { if (a.screenshots) return this.fillShots(a, a.screenshots); if (!this.shots[a.id]) this.shots[a.id] = await this.B.getShots(a.id); this.fillShots(a, this.shots[a.id]); }
+  fillShots(a, list) { if (this.sel !== a.id) return; const box = $("#shotBox"); if (!box) return; box.innerHTML = (list || []).length ? `<div class="shots">${list.map(s => `<img src="${esc(s)}" alt="" loading="lazy">`).join("")}</div>` : ""; $$("#shotBox .shots img").forEach(i => i.onclick = () => { $("#lb img").src = i.src; $("#lb").classList.add("show"); }); }
+  async loadReviews(a) { const l = await this.B.getReviews(a.id); this.revs[a.id] = l; if (this.sel === a.id) this.renderReviews(a); }
   stars(n) { n = Math.round(n); return "★".repeat(n) + "☆".repeat(5 - n); }
   state(a) { const v = this.inst[a.id]; return !v ? "install" : v !== a.version ? "update" : "done"; }
   renderPanel() {
-    const a = this.apps.find(x => x.id === this.sel); if (!a) return; const T = (k) => esc(this.t(k)), revs = this.reviewsOf(a);
-    const cnt = a.ratingCount || revs.length || 0, avg = revs.length && !a.rating ? revs.reduce((s, r) => s + r.rating, 0) / revs.length : a.rating || 0;
-    const dist = [5, 4, 3, 2, 1].map(s => { if (revs.length >= 3) return revs.filter(r => Math.round(r.rating) === s).length / revs.length; const d = Math.abs(s - avg); return Math.max(.03, Math.exp(-d * d / 1.2)) / 1.9 * (s === 5 ? 1.2 : 1); });
-    const tot = Math.max(...dist, .01);
+    const a = this.apps.find(x => x.id === this.sel); if (!a) return; const T = (k) => esc(this.t(k));
     const sims = this.apps.filter(x => x.id !== a.id).sort((x, y) => (y.category === a.category) - (x.category === a.category)).slice(0, 8);
     const desc = String(a.description || ""), long = desc.length > 220;
     $("#pbody").innerHTML = `
     <div class="phead"><img src="${esc(a.icon)}" alt=""><div><h2>${esc(a.name)}</h2><div class="dev">${esc(a.developer)}</div><div class="tg">${esc(a.tagline)}</div></div></div>
     <div class="badges" style="margin-top:14px">${a.featured ? `<span class="badge o">★ ${T("featured")}</span>` : ""}${this.isNew(a) ? `<span class="badge g">${T("newb")}</span>` : ""}${this.state(a) === "update" ? `<span class="badge o">${T("upd")}</span>` : ""}<span class="badge">${esc(a.category)}</span></div>
-    <div class="stats"><div><b>${esc(a.rating)} ★</b><span>${cnt ? esc(cnt) + " " + T("ratings") : esc(a.android)}</span></div><div><b>${esc(a.size)}</b><span>${T("size")}</span></div><div><b>${esc(a.downloads)}</b><span>${T("downloads")}</span></div><div><b>v${esc(a.version)}</b><span>${T("version")}</span></div></div>
-    ${(a.screenshots || []).length ? `<div class="shots">${a.screenshots.map(s => `<img src="${esc(s)}" alt="" loading="lazy">`).join("")}</div>` : ""}
+    <div class="stats"><div><b>${a.rating ? esc(a.rating) + " ★" : "–"}</b><span>${a.ratingCount ? esc(a.ratingCount) + " " + T("ratings") : esc(a.android)}</span></div><div><b>${esc(a.size)}</b><span>${T("size")}</span></div><div><b>${esc(a.downloads)}</b><span>${T("downloads")}</span></div><div><b>v${esc(a.version)}</b><span>${T("version")}</span></div></div>
+    <div id="shotBox"></div>
     <div class="sec"><h3>${T("about")}</h3><p id="desc">${esc(long ? desc.slice(0, 220) + "…" : desc)}</p>${long ? `<button class="more" id="moreBtn">${T("more")}</button>` : ""}</div>
     ${(a.whatsNew || []).length ? `<div class="sec"><h3>${T("whatsNew")}</h3><ul>${a.whatsNew.map(w => `<li>${esc(w)}</li>`).join("")}</ul></div>` : ""}
-    <div class="sec"><h3>${T("reviews")}</h3>
-      <div class="rate"><div><div class="big">${avg ? Number(avg).toFixed(1) : "–"}</div><div class="stars">${this.stars(avg)}</div></div><div class="bars">${[5, 4, 3, 2, 1].map((s, i) => `<div>${s}<i><u style="width:${(dist[i] / tot * 100).toFixed(0)}%"></u></i></div>`).join("")}</div></div>
-      ${revs.length ? revs.map(r => `<div class="rev"><div class="h">${esc(r.name || "User")}<span>${esc(r.date || "")}</span></div><div class="stars">${this.stars(r.rating)}</div><p>${esc(r.text)}</p></div>`).join("") : `<p style="margin-top:10px;color:var(--mut)">${T("noRev")}</p>`}
-      <div class="write sec"><h3>${T("writeRev")}</h3><div class="starpick" id="sp">${[1, 2, 3, 4, 5].map(i => `<button data-s="${i}">★</button>`).join("")}</div><input id="rn" placeholder="${T("yourName")}" maxlength="30"><textarea id="rt" rows="3" placeholder="${T("yourRev")}" maxlength="400"></textarea><button class="btn main" id="rs" style="margin-top:8px">${T("submit")}</button></div>
-    </div>
+    <div class="sec"><h3>${T("reviews")}</h3><div id="revBox"></div></div>
     ${(a.permissions || []).length ? `<div class="sec"><h3>${T("perms")}</h3>${a.permissions.map(p => `<span class="perm">${esc(p)}</span>`).join("")}</div>` : ""}
     <div class="sec"><h3>${T("info")}</h3><table class="info">${[["version", a.version], ["size", a.size], ["android", a.android], ["updated", a.updated], ["category", a.category], ["developer", a.developer], ["package", a.package], ["price", a.price === "Free" ? this.t("free") : a.price]].filter(r => r[1]).map(r => `<tr><td>${T(r[0])}</td><td>${esc(r[1])}</td></tr>`).join("")}</table></div>
     ${sims.length ? `<div class="sec"><h3>${T("similar")}</h3><div class="sim">${sims.map(s => `<button data-id="${esc(s.id)}"><img src="${esc(s.icon)}" alt="">${esc(s.name)}</button>`).join("")}</div></div>` : ""}`;
     const mb = $("#moreBtn"); if (mb) mb.onclick = () => { this.expanded = !this.expanded; $("#desc").textContent = this.expanded ? desc : desc.slice(0, 220) + "…"; mb.textContent = this.t(this.expanded ? "less" : "more"); };
-    $$("#pbody .shots img").forEach(i => i.onclick = () => { $("#lb img").src = i.src; $("#lb").classList.add("show"); });
     $$("#pbody .sim button").forEach(b => b.onclick = () => this.open(b.dataset.id));
-    let rating = 0; $$("#sp button").forEach(b => b.onclick = () => { rating = +b.dataset.s; $$("#sp button").forEach(x => x.classList.toggle("on", +x.dataset.s <= rating)); });
-    $("#rs").onclick = () => { const text = $("#rt").value.trim(); if (!rating || !text) return; const list = this.myRev[a.id] || []; list.unshift({name: $("#rn").value.trim() || "You", rating, text, date: new Date().toISOString().slice(0, 10)}); this.myRev[a.id] = list; LS.set("rev", this.myRev); this.toast(this.t("thanks")); this.renderPanel(); this.sfx("ok"); };
-    this.renderBar(a);
+    this.renderBar(a); if (a.screenshots) this.fillShots(a, a.screenshots); else if (this.shots[a.id]) this.fillShots(a, this.shots[a.id]); this.renderReviews(a);
+  }
+  renderReviews(a) {
+    const box = $("#revBox"); if (!box) return; const T = (k) => esc(this.t(k)), revs = this.revs[a.id] || [], u = this.user;
+    const avg = a.rating || (revs.length ? revs.reduce((s, r) => s + r.rating, 0) / revs.length : 0);
+    const dist = [5, 4, 3, 2, 1].map(s => { if (revs.length >= 3) return revs.filter(r => Math.round(r.rating) === s).length / revs.length; const d = Math.abs(s - avg); return Math.max(.03, Math.exp(-d * d / 1.2)) / 1.9 * (s === 5 ? 1.2 : 1); }), tot = Math.max(...dist, .01);
+    const mine = u && revs.find(r => r.uid === u.uid), canDel = (r) => u && (r.uid === u.uid || u.isAdmin);
+    box.innerHTML = `<div class="rate"><div><div class="big">${avg ? Number(avg).toFixed(1) : "–"}</div><div class="stars">${this.stars(avg)}</div></div><div class="bars">${[5, 4, 3, 2, 1].map((s, i) => `<div>${s}<i><u style="width:${(dist[i] / tot * 100).toFixed(0)}%"></u></i></div>`).join("")}</div></div>
+      ${revs.length ? revs.map(r => `<div class="rev"><div class="h">${esc(r.name || "User")}<span>${esc(r.date || "")}</span></div><div class="stars">${this.stars(r.rating)}</div><p>${esc(r.text)}</p>${canDel(r) ? `<button class="more" data-rd="${esc(r.uid)}">${T("del")}</button>` : ""}</div>`).join("") : `<p style="margin-top:10px;color:var(--mut)">${T("noRev")}</p>`}
+      <div class="write sec"><h3>${T("writeRev")}</h3>${u ? `<div class="starpick" id="sp">${[1, 2, 3, 4, 5].map(i => `<button data-s="${i}">★</button>`).join("")}</div><textarea id="rt" rows="3" placeholder="${T("yourRev")}" maxlength="400">${mine ? esc(mine.text) : ""}</textarea><button class="btn main" id="rs" style="margin-top:8px">${T("submit")}</button>` : `<button class="btn main" id="rlogin">${T("loginToReview")}</button>`}</div>`;
+    let rating = mine ? mine.rating : 0; const paint = () => $$("#sp button").forEach(x => x.classList.toggle("on", +x.dataset.s <= rating)); paint();
+    $$("#sp button").forEach(b => b.onclick = () => { rating = +b.dataset.s; paint(); });
+    const rl = $("#rlogin"); if (rl) rl.onclick = () => this.openAuth();
+    const rs = $("#rs"); if (rs) rs.onclick = async () => { const text = $("#rt").value.trim(); if (!rating) return this.toast(this.t("needRating")); if (!text) return; rs.disabled = true; try { await this.B.addReview(a.id, {uid: u.uid, name: u.name, rating, text, date: new Date().toISOString().slice(0, 10)}); this.toast(this.t("thanks")); this.sfx("ok"); await this.loadReviews(a); } catch (e) { this.toast(e.message, 3500); rs.disabled = false; } };
+    $$("[data-rd]", box).forEach(b => b.onclick = async () => { try { await this.B.deleteReview(a.id, b.dataset.rd); await this.loadReviews(a); } catch (e) { this.toast(e.message, 3500); } });
   }
   renderBar(a) {
     const s = this.state(a), w = this.wish.includes(a.id), label = s === "install" ? this.t("install") + (a.price && a.price !== "Free" ? " · " + a.price : "") : s === "update" ? this.t("update") : this.t("open");
     $("#bar").innerHTML = `<button class="sq ${w ? "on" : ""}" id="bw" title="Wishlist">${w ? "♥" : "♡"}</button><button class="inst ${s === "done" ? "done" : ""}" id="bi"><i></i><span>${esc(label)}</span></button><button class="sq" id="bs" title="${esc(this.t("share"))}">⤴</button>`;
-    $("#bw").onclick = () => { const i = this.wish.indexOf(a.id); if (i < 0) { this.wish.push(a.id); this.toast(this.t("wish")); } else { this.wish.splice(i, 1); this.toast(this.t("unwish")); } LS.set("wish", this.wish); this.renderBar(a); this.refresh(); this.sfx("tick"); };
+    $("#bw").onclick = () => { const i = this.wish.indexOf(a.id); if (i < 0) { this.wish.push(a.id); this.toast(this.t("wish")); } else { this.wish.splice(i, 1); this.toast(this.t("unwish")); } this.saveUser(); this.renderBar(a); this.refresh(); this.sfx("tick"); };
     $("#bs").onclick = async () => { const url = location.origin + location.pathname + "#app=" + encodeURIComponent(a.id); try { if (navigator.share) { await navigator.share({title: a.name, text: a.tagline, url}); return; } } catch (e) { return; } try { await navigator.clipboard.writeText(url); } catch (e) {} this.toast(this.t("copied")); };
     $("#bi").onclick = () => this.install(a);
   }
   install(a) {
     const st = this.state(a); if (st === "done") { this.toast(this.t("open")); return; }
+    if (!window.__PREVIEW && (!a.apk || a.apk.charAt(0) === "#")) { this.toast("APK link nei — admin panel e APK dao.", 3500); return; }
     const btn = $("#bi"), bar = $("i", btn), span = $("span", btn); span.textContent = this.t("downloading"); btn.disabled = true; this.sfx("dl");
-    let p = 0; const iv = setInterval(() => { p += 4 + Math.random() * 9; bar.style.width = Math.min(100, p) + "%"; if (p >= 100) { clearInterval(iv); this.finishInstall(a); } }, 90);
+    let p = 0; const iv = setInterval(() => { p += 5 + Math.random() * 10; bar.style.width = Math.min(100, p) + "%"; if (p >= 100) { clearInterval(iv); this.finishInstall(a); } }, 80);
   }
   finishInstall(a) {
-    if (!window.__PREVIEW) { const l = document.createElement("a"); l.href = a.apk; l.download = (a.name || "app").replace(/\s+/g, "-") + ".apk"; document.body.appendChild(l); l.click(); l.remove(); }
-    this.inst[a.id] = a.version; LS.set("inst", this.inst); this.toast(window.__PREVIEW ? this.t("previewToast") : this.t("installedToast"), 3200); this.sfx("ok"); this.renderBar(a); this.refresh(); if (this.sel === a.id) this.renderPanel();
+    if (!window.__PREVIEW) { const l = document.createElement("a"); l.href = a.apk; l.download = (a.name || "app").replace(/\s+/g, "-") + ".apk"; l.rel = "noopener"; document.body.appendChild(l); l.click(); l.remove(); }
+    this.inst[a.id] = a.version; this.saveUser(); this.toast(window.__PREVIEW ? this.t("previewToast") : this.t("installedToast"), 3200); this.sfx("ok"); this.renderBar(a); this.refresh(); if (this.sel === a.id) this.renderPanel();
   }
   toast(msg, ms = 2000) { const t = $("#toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(this._tt); this._tt = setTimeout(() => t.classList.remove("show"), ms); }
   /* ---------- sound (synthesised, no files) ---------- */
@@ -1480,7 +1657,5 @@ class Store {
     } catch (e) {}
   }
 }
-window.addEventListener("load", () => {
-  const start = (d) => { window.store = new Store(d); };
-  if (window.__DATA) start(window.__DATA); else fetch("apps.json").then(r => r.json()).then(start).catch(e => { document.body.insertAdjacentHTML("beforeend", "<p style='position:fixed;inset:40% 0 0;text-align:center;color:#fff'>Could not load apps.json</p>"); console.error(e); });
-});
+const __boot = () => { window.store = new Store(); window.store.start().catch(e => console.error(e)); };
+if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", __boot); else __boot();

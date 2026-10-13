@@ -1,47 +1,34 @@
-# 3D APK Store — Setup Guide (GitHub + Vercel)
+# MD APK Store – Setup Guide (Banglish)
 
-## Folder
-- `index.html`, `app.js` — website (kono change lagbe na)
-- `apps.json` — **tomar sob app ekhane**
-- `apk/` — tomar `.apk` file gula
-- `assets/` — icon + screenshot (png/jpg/svg)
-- `vercel.json`
+## A. Firebase (ek bar)
+1. console.firebase.google.com → Add project (Analytics off).
+2. Build → Authentication → Get started → Sign-in method → **Email/Password** Enable (Google chaile oita-o).
+3. Authentication → Settings → Authorized domains → Add: `mdapkstore.vercel.app` (tomar Vercel domain).
+4. Build → Firestore Database → Create database (production mode).
+5. Firestore → Rules → `firestore.rules` file er shob copy kore paste → Publish.
+6. Project settings (gear) → Your apps → Web `</>` → register → `firebaseConfig` er value gulo copy.
+7. GitHub e `config.js` open → ✏️ edit → `firebase:{...}` er vitor oi value gulo boshao → Commit.
 
-## Notun app add kora (apps.json)
-```json
-{
-  "id": "my-app",            // unique, space chhara
-  "name": "My App",
-  "tagline": "Short line",
-  "category": "Tools",
-  "icon": "assets/my-app.png",
-  "color": "#e8a33d",        // 3D tile er body colour
-  "version": "1.0.0",        // version bodlale user ke "Update" dekhabe
-  "size": "12 MB", "android": "Android 8.0+", "updated": "2026-10-12",
-  "rating": 4.6, "ratingCount": 120, "downloads": "1K+", "price": "Free",
-  "developer": "Your Name", "package": "com.you.myapp", "featured": true,
-  "description": "Long description...",
-  "whatsNew": ["Fix 1", "Feature 2"],
-  "permissions": ["Internet", "Storage"],
-  "screenshots": ["assets/s1.png", "assets/s2.png"],
-  "reviews": [{"name":"Rahim","rating":5,"text":"Great!","date":"2026-10-01"}],
-  "apk": "apk/my-app.apk"
-}
-```
-Rack e 24 ta app dhore (2 ta kore protiti ghore, upor theke). Beshi hole "All apps" list view e dekha jabe.
-Storer naam: `"storeName"` (apps.json er upore).
+## B. APK hosting (GitHub Releases)
+1. `config.js` e `github:{owner:"muradhase457-debug", repo:"MDAPKSTORE"}` likho → Commit.
+2. GitHub → Settings → Developer settings → Fine-grained tokens → Generate: repo = MDAPKSTORE, Permission **Contents: Read and write**. Token copy koro.
+3. Admin panel → Settings tab → Owner/Repo/Token boshao → Test.
+(Token sudhu tomar phone er browser e thake.)
 
-## GitHub (browser diye, kono command lagbe na)
-1. github.com → **New repository** → naam `apk-store` → Public → Create.
-2. **uploading an existing file** e click → zip er vitorer sob file/folder drag-drop → **Commit changes**.
-3. APK file 25MB er beshi hole web upload hobe na → repo te **Releases → Create release** → APK attach → link copy kore `apps.json` er `"apk"` e full URL boshao.
+## C. Admin hou
+1. `tomar-site/admin.html` open → Create account.
+2. "Admin access nei" screen e UID dekhabe → Copy.
+3. Firebase → Firestore → Start collection `admins` → Document ID = oi UID → field `ok` = true → Save.
+4. admin.html reload → ekhon admin.
 
-## Vercel
-1. vercel.com → GitHub diye login → **Add New → Project**.
-2. `apk-store` repo **Import**.
-3. Framework Preset: **Other**. Build command / Output khali. **Deploy**.
-4. 1 minute pore link pabe: `https://apk-store-xxx.vercel.app`.
-5. Notun app: GitHub e `apps.json` + apk upload → Vercel auto update.
+## D. App upload / delete
+admin.html → Add app → icon, screenshot, naam, details, APK file select → Save.
+My apps tab theke Delete (APK-o delete hoy).
+GitHub upload kaj na korle "Paste link" mode: APK manually GitHub Release e dao, link paste koro.
 
-## Test locally
-`python3 -m http.server 8000` → http://localhost:8000
+## E. User account
+Store e login/sign up korle wishlist, installed, review shob account e save. Onno phone e same email+password dile same data.
+
+## GitHub e upload korar file
+index.html, admin.html, app.js, config.js, backend.js, authview.js, admin.js, vercel.json, firestore.rules, GUIDE.md, apps.json, assets/ (optional), apk/ (optional).
+Firebase config na dile site demo mode e cholbe (data sudhu oi phone e).
